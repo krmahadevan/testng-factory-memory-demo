@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.testng.demo</groupId>
+  <artifactId>testng-factory-memory-demo</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <name>TestNG @Factory reflective-handle memory demo</name>
+  <description>
+    Standalone harness that quantifies the memory saved by PR #3353 (interning + soft-holding
+    reflective handles in ConstructorOrMethod). It runs an identical @Factory-powered suite twice
+    against the SAME jar, flipping only -Dtestng.reflection.intern, and measures the retained
+    java.lang.reflect.Method/Constructor population each way.
+  </description>
+
+  <properties>
+    <maven.compiler.release>11</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Consumes the jar published from the PR branch via `./gradlew publishToMavenLocal`. -->
+    <testng.version>7.13.0-SNAPSHOT</testng.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.testng</groupId>
+      <artifactId>testng</artifactId>
+      <version>${testng.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>testng-factory-memory-demo</finalName>
+    <plugins>
+      <!-- Stage all runtime dependencies under target/dependency so run.sh can build a stable,
+           offline classpath (target/classes:target/dependency/*) without re-resolving at run time. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.8.1</version>
+        <executions>
+          <execution>
+            <id>copy-runtime-deps</id>
+            <phase>package</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <includeScope>runtime</includeScope>
+              <outputDirectory>${project.build.directory}/dependency</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
