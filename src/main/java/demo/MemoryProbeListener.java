@@ -111,8 +111,7 @@ public class MemoryProbeListener implements IInvokedMethodListener {
                   || line.contains("java.lang.reflect.Constructor")
                   || line.contains("java.lang.ref.SoftReference")
                   || line.contains("java.lang.ref.WeakReference")
-                  || line.contains("org.testng.internal.ConstructorOrMethod")
-                  || line.contains("org.testng.internal.MemberKey");
+                  || line.contains("org.testng.internal.ConstructorOrMethod");
           if (full) {
             if (shown++ < topN) {
               System.out.println("  " + line.trim());

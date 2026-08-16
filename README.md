@@ -86,8 +86,10 @@ suite; `MemoryProbeListener` waits for that first test and then, on the spot:
    held, not short-lived garbage.
 2. **Reads used heap** — `ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed()`.
 3. **Counts the objects** — shells out to `jcmd <own-pid> GC.class_histogram` and picks out the rows
-   for `java.lang.reflect.Method`, `Constructor`, `ConstructorOrMethod` and `MemberKey`. This gives
-   the exact live instance count and byte size of each — no heap-dump parsing needed.
+   for `java.lang.reflect.Method`, `Constructor` and `ConstructorOrMethod`. This gives the exact live
+   instance count and byte size of each — no heap-dump parsing needed. New to `jcmd`? See
+   [docs/jcmd.md](docs/jcmd.md) for what it is, what its output looks like, and how the demo parses
+   it.
 4. **Holds still, then exits** — so it never has to run all N tests.
 
 `matrix.sh` just does this for each JDK and each of the three versions and lays the results in a
@@ -277,6 +279,93 @@ in a `ClassValue` and is collected together with the class.
 **This is the measurement that decided the design.** The PR was simplified to the plain strong cache
 you see in Test 1 and Test 2.
 
+## Test 4 — what stays retained *after* the run (`retention-matrix.sh`)
+
+Test 1 measures the peak, while the suite is alive. This measures the opposite end: once the suite
+has finished and been let go, how much does the cache still hold? The cache keeps its handles for as
+long as the declaring class is loaded, so it is fair to ask what that persistent cost is.
+
+`RetentionProbe` runs the suite **to completion**, drops every reference to TestNG and the suite
+model, forces GC (keeping the app's class loader alive), then counts the reflective handles still
+alive via `jcmd GC.class_histogram`.
+
+```bash
+./retention-matrix.sh          # 2000 instances by default
+```
+
+### What we saw (2000 instances)
+
+Live handles after the suite is collected:
+
+| JDK | Version | live `Method` | live `Constructor` | live `ConstructorOrMethod` |
+|-----|---------|---------------|--------------------|----------------------------|
+| 11  | 7.12 pre-PR | 377 | 185 | **0** |
+| 11  | 7.13 OFF | 383 | 183 | **0** |
+| 11  | 7.13 ON | **390** | 183 | **0** |
+| 17  | 7.12 pre-PR | 268 | 170 | **0** |
+| 17  | 7.13 OFF | 274 | 168 | **0** |
+| 17  | 7.13 ON | **281** | 168 | **0** |
+
+What this says:
+
+- **The wrappers are all gone** — `ConstructorOrMethod` drops to **0** in every column once the suite
+  is collected. The cache holds only the shared `Executable` handles, never the wrappers.
+- **The cache's persistent cost is tiny and fixed**: `ON − OFF` is **exactly 7 live `Method`s** on
+  both JDKs — one per distinct `@Test`/config method in the class, *not* one per instance. Make the
+  factory produce 2,000 instances or 2,000,000; that number does not move. It scales with the number
+  of distinct methods in the suite, which is what you want.
+- **The big shared baseline (~270–390) is the JVM's own reflection cache**, present in every column
+  including pre-PR — nothing to do with this change.
+
+So the trade is: a large **temporary** peak reduction (Test 1) for a **persistent** cost of a handful
+of handles. That is the honest shape of it.
+
+## Test 5 — where the reflective handles actually come from (JFR)
+
+A fair question: is TestNG creating these handles through one wasteful repeated lookup (in which case
+fix the producer), or through many legitimate reflection paths (in which case interning is the right
+layer)? A JFR allocation recording answers it.
+
+```bash
+java -XX:StartFlightRecording=filename=alloc.jfr,settings=profile,dumponexit=true \
+  -Xmx2g -Ddemo.instances=3000 -Dtestng.reflection.intern=true \
+  -cp "target/classes:target/dependency/*" demo.RetentionProbe
+jfr print --events jdk.ObjectAllocationSample --stack-depth 30 alloc.jfr
+```
+
+### What we saw
+
+**Every `java.lang.reflect.Method` allocation traces to the same discovery path** — a fresh copy of
+the whole method array from `Class.getDeclaredMethods()`:
+
+```
+java.lang.reflect.Method.copy()
+  <- java.lang.Class.getDeclaredMethods()
+  <- org.testng.internal.reflect.ReflectionHelper.getLocalMethods
+  <- org.testng.internal.ClassHelper.getAvailableMethods
+  <- org.testng.internal.TestNGMethodFinder.findConfiguration   (once per config-method type)
+  <- org.testng.TestClass.initMethods
+  <- org.testng.TestRunner.init
+```
+
+And the clone path **does not** re-look-up: `TestNGMethod.clone()` passes the *existing*
+`getConstructorOrMethod().getMethod()` into a new wrapper — it re-wraps, it does not rediscover.
+
+So the handles are born from **several legitimate reflection paths** (one `getDeclaredMethods` per
+config-method type, per class init, plus re-wrapping on clone), not one pathological hot lookup that
+could be cheaply cached at a single producer. That is exactly the case where interning at the
+`ConstructorOrMethod` chokepoint is the right fix: it catches every path uniformly.
+
+Two honest caveats on the profile:
+
+- `jdk.ObjectAllocationSample` is **size-weighted**, so it under-samples small `Method` objects. The
+  *stacks* are reliable (they all agree); the raw sample *count* is not a headcount of allocations.
+- By allocated **bytes**, `Method` is not even a blip. The run's real allocation churn is
+  `java.util.Optional` — ~1,300 samples — from `BaseTestMethod.getInstance()`, which builds a
+  two-stage `Optional.ofNullable(...).map(...).map(...)` chain on **every** call (via
+  `TestNgMethodUtils.isSameInstance`). That is a per-invocation hotspot unrelated to this PR — a
+  separate, worthwhile cleanup.
+
 ## The bottom line
 
 Deduplication is the real win, and a **simple strong-reference cache delivers all of it** — the
@@ -284,6 +373,10 @@ footprint reduction (Claim 1) and the better behaviour under pressure (Claim 2) 
 holding fewer live objects, not from any reclaim trick. The soft-reference + rebuild machinery from
 the first draft of the PR did not pay for its complexity in any of these measurements, so it was
 dropped.
+
+After the run the cache costs only a handful of handles (Test 4), and those handles come from many
+legitimate reflection paths rather than one fixable producer (Test 5) — so interning at the
+`ConstructorOrMethod` layer is both a small persistent cost and the right place to do it.
 
 ## Files
 
@@ -293,9 +386,12 @@ dropped.
 | `Runner.java` | Runs the suite for the footprint test. |
 | `MemoryProbeListener.java` | Takes the footprint reading at the right moment. |
 | `PressureProbe.java` | The GC-under-pressure test (and the strong-vs-soft comparison). |
+| `RetentionProbe.java` | Runs the suite to completion, then counts the handles still alive (Test 4). Also the JFR target for Test 5. |
 | `StrongDedupCache.java` | A standalone copy of the strong-reference cache, used for the Test 3 comparison. It mirrors what the shipped PR now does. |
 | `matrix.sh` | Footprint comparison across JDKs. |
 | `pressure-matrix.sh` | Pressure comparison across JDKs. |
+| `retention-matrix.sh` | Post-run retention comparison across JDKs. |
+| `docs/jcmd.md` | A beginner's guide to `jcmd` and how the demo uses it. |
 
 ## Handy knobs
 

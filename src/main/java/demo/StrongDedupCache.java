@@ -3,32 +3,30 @@ package demo;
 import java.lang.reflect.Executable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import org.testng.internal.MemberKey;
+import java.util.function.Function;
 
 /**
- * The simpler alternative juherr proposed, for comparison: a {@code ClassValue -> Map<MemberKey,
- * Executable>} that deduplicates reflective handles but holds them <b>strongly</b> — no
- * SoftReference, no rebuild, no revive, no per-Entry locking.
+ * A standalone copy of the shipped cache ({@code org.testng.internal.ExecutableCache}): a {@code
+ * ClassValue -> Map<Executable, Executable>} that de-duplicates reflective handles and holds them
+ * strongly. The {@link Executable} is its own key — {@code Method}/{@code Constructor} equality
+ * already compares declaring class, name, parameter types and (for methods) return type — so no
+ * extra key object is built per lookup.
  *
- * <p>It gives exactly the same deduplication as the PR's soft cache (all wrappers for one member
- * share one {@code Method}/{@code Constructor}). The only thing it cannot do is drop an idle handle
- * under memory pressure. This class exists purely to measure whether that one extra ability is worth
- * the soft-reference machinery.
+ * <p>Kept here so the demo can exercise the "strong dedup" strategy directly, independently of the
+ * product jar.
  */
 public final class StrongDedupCache {
 
-  private final ClassValue<ConcurrentMap<MemberKey, Executable>> cache =
+  private final ClassValue<ConcurrentMap<Executable, Executable>> cache =
       new ClassValue<>() {
         @Override
-        protected ConcurrentMap<MemberKey, Executable> computeValue(Class<?> type) {
+        protected ConcurrentMap<Executable, Executable> computeValue(Class<?> type) {
           return new ConcurrentHashMap<>();
         }
       };
 
   /** Returns the one shared handle for {@code seed}'s member, storing {@code seed} the first time. */
   public Executable intern(Executable seed) {
-    return cache
-        .get(seed.getDeclaringClass())
-        .computeIfAbsent(new MemberKey(seed), key -> seed);
+    return cache.get(seed.getDeclaringClass()).computeIfAbsent(seed, Function.identity());
   }
 }

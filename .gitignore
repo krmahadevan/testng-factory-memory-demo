@@ -26,3 +26,6 @@ target/
 .idea/
 .settings/
 .classpath
+
+# JFR recordings from Test 5
+*.jfr

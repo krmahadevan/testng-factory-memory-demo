@@ -19,8 +19,9 @@ import org.testng.annotations.Test;
  *       copy per lookup, so {@code instances * methodsPerInstance} distinct {@code Method} objects
  *       stay pinned for the whole suite.
  *   <li><b>With the PR</b> ({@code -Dtestng.reflection.intern=true}, the default): all wrappers for
- *       one physical method share a single interned {@code Method}, held softly, so the population
- *       collapses to roughly {@code methodsPerInstance} handles regardless of instance count.
+ *       one physical method share a single interned {@code Method}, held in a shared strong cache, so
+ *       the population collapses to roughly {@code methodsPerInstance} handles regardless of instance
+ *       count.
  * </ul>
  *
  * <p>The method bodies are intentionally trivial — the memory under study is the retained reflective
